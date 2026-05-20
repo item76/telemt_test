@@ -515,8 +515,13 @@ fn exclusive_mask_target_for_sni<'a>(
     config: &'a ProxyConfig,
     sni: &str,
 ) -> Option<MaskTcpTarget<'a>> {
-    for (domain, target) in &config.censorship.exclusive_mask {
-        if domain.eq_ignore_ascii_case(sni) {
+    if let Some(target) = config.censorship.exclusive_mask.get(sni) {
+        return parse_exclusive_mask_target(target);
+    }
+
+    if sni.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        let normalized_sni = sni.to_ascii_lowercase();
+        if let Some(target) = config.censorship.exclusive_mask.get(&normalized_sni) {
             return parse_exclusive_mask_target(target);
         }
     }
@@ -529,17 +534,27 @@ fn mask_host_for_initial_data<'a>(config: &'a ProxyConfig, initial_data: &[u8]) 
     mask_tcp_target_for_initial_data(config, initial_data).host
 }
 
+#[cfg(test)]
 fn mask_tcp_target_for_initial_data<'a>(
     config: &'a ProxyConfig,
     initial_data: &[u8],
 ) -> MaskTcpTarget<'a> {
-    if let Some(target) = tls::extract_sni_from_client_hello(initial_data)
+    let sni = tls::extract_sni_from_client_hello(initial_data);
+    if let Some(target) = sni
         .as_deref()
         .and_then(|sni| exclusive_mask_target_for_sni(config, sni))
     {
         return target;
     }
 
+    default_mask_tcp_target_for_initial_data(config, initial_data, sni.as_deref())
+}
+
+fn default_mask_tcp_target_for_initial_data<'a>(
+    config: &'a ProxyConfig,
+    initial_data: &[u8],
+    sni: Option<&str>,
+) -> MaskTcpTarget<'a> {
     let configured_mask_host = config
         .censorship
         .mask_host
@@ -553,8 +568,13 @@ fn mask_tcp_target_for_initial_data<'a>(
         };
     }
 
-    let host = tls::extract_sni_from_client_hello(initial_data)
-        .as_deref()
+    let extracted_sni = if sni.is_none() {
+        tls::extract_sni_from_client_hello(initial_data)
+    } else {
+        None
+    };
+    let host = sni
+        .or(extracted_sni.as_deref())
         .and_then(|sni| matching_tls_domain_for_sni(config, sni))
         .unwrap_or(configured_mask_host);
     MaskTcpTarget {
@@ -858,7 +878,8 @@ pub async fn handle_bad_client<R, W>(
         return;
     }
 
-    let exclusive_tcp_target = tls::extract_sni_from_client_hello(initial_data)
+    let client_sni = tls::extract_sni_from_client_hello(initial_data);
+    let exclusive_tcp_target = client_sni
         .as_deref()
         .and_then(|sni| exclusive_mask_target_for_sni(config, sni));
 
@@ -943,8 +964,9 @@ pub async fn handle_bad_client<R, W>(
         return;
     }
 
-    let mask_target = exclusive_tcp_target
-        .unwrap_or_else(|| mask_tcp_target_for_initial_data(config, initial_data));
+    let mask_target = exclusive_tcp_target.unwrap_or_else(|| {
+        default_mask_tcp_target_for_initial_data(config, initial_data, client_sni.as_deref())
+    });
     let mask_host = mask_target.host;
     let mask_port = mask_target.port;
 

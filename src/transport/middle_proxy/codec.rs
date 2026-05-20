@@ -9,6 +9,7 @@ use crate::protocol::constants::*;
 pub(crate) enum WriterCommand {
     Data(Bytes),
     DataAndFlush(Bytes),
+    ControlAndFlush([u8; 12]),
     Close,
 }
 
@@ -40,6 +41,13 @@ pub(crate) fn rpc_crc(mode: RpcChecksumMode, data: &[u8]) -> u32 {
         RpcChecksumMode::Crc32 => crc32(data),
         RpcChecksumMode::Crc32c => crc32c(data),
     }
+}
+
+pub(crate) fn build_control_payload(tag: u32, value: u64) -> [u8; 12] {
+    let mut payload = [0u8; 12];
+    payload[..4].copy_from_slice(&tag.to_le_bytes());
+    payload[4..].copy_from_slice(&value.to_le_bytes());
+    payload
 }
 
 pub(crate) fn build_rpc_frame(seq_no: i32, payload: &[u8], crc_mode: RpcChecksumMode) -> Vec<u8> {

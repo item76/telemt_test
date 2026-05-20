@@ -392,12 +392,18 @@ impl UserIpTracker {
         let now = Instant::now();
 
         let (mut active_ips, mut recent_ips) = self.active_and_recent_write().await;
-        let user_active = active_ips
-            .entry(username.to_string())
-            .or_insert_with(HashMap::new);
-        let user_recent = recent_ips
-            .entry(username.to_string())
-            .or_insert_with(HashMap::new);
+        if !active_ips.contains_key(username) {
+            active_ips.insert(username.to_string(), HashMap::new());
+        }
+        if !recent_ips.contains_key(username) {
+            recent_ips.insert(username.to_string(), HashMap::new());
+        }
+        let Some(user_active) = active_ips.get_mut(username) else {
+            return Err(format!("IP tracker active entry unavailable for user '{username}'"));
+        };
+        let Some(user_recent) = recent_ips.get_mut(username) else {
+            return Err(format!("IP tracker recent entry unavailable for user '{username}'"));
+        };
         let pruned_recent_entries = Self::prune_recent(user_recent, now, window);
         Self::decrement_counter(&self.recent_entry_count, pruned_recent_entries);
         let recent_contains_ip = user_recent.contains_key(&ip);

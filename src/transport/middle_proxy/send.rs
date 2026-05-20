@@ -7,7 +7,6 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use bytes::Bytes;
 use tokio::sync::mpsc::error::TrySendError;
 use tracing::{debug, warn};
 
@@ -17,7 +16,7 @@ use crate::network::IpFamily;
 use crate::protocol::constants::{RPC_CLOSE_CONN_U32, RPC_CLOSE_EXT_U32};
 
 use super::MePool;
-use super::codec::WriterCommand;
+use super::codec::{WriterCommand, build_control_payload};
 use super::pool::WriterContour;
 use super::registry::ConnMeta;
 use super::wire::build_proxy_req_payload;
@@ -735,11 +734,9 @@ impl MePool {
 
     pub async fn send_close(self: &Arc<Self>, conn_id: u64) -> Result<()> {
         if let Some(w) = self.registry.get_writer(conn_id).await {
-            let mut p = Vec::with_capacity(12);
-            p.extend_from_slice(&RPC_CLOSE_EXT_U32.to_le_bytes());
-            p.extend_from_slice(&conn_id.to_le_bytes());
+            let payload = build_control_payload(RPC_CLOSE_EXT_U32, conn_id);
             if w.tx
-                .send(WriterCommand::DataAndFlush(Bytes::from(p)))
+                .send(WriterCommand::ControlAndFlush(payload))
                 .await
                 .is_err()
             {
@@ -756,10 +753,8 @@ impl MePool {
 
     pub async fn send_close_conn(self: &Arc<Self>, conn_id: u64) -> Result<()> {
         if let Some(w) = self.registry.get_writer(conn_id).await {
-            let mut p = Vec::with_capacity(12);
-            p.extend_from_slice(&RPC_CLOSE_CONN_U32.to_le_bytes());
-            p.extend_from_slice(&conn_id.to_le_bytes());
-            match w.tx.try_send(WriterCommand::DataAndFlush(Bytes::from(p))) {
+            let payload = build_control_payload(RPC_CLOSE_CONN_U32, conn_id);
+            match w.tx.try_send(WriterCommand::ControlAndFlush(payload)) {
                 Ok(()) => {}
                 Err(TrySendError::Full(cmd)) => {
                     let _ = tokio::time::timeout(Duration::from_millis(50), w.tx.send(cmd)).await;

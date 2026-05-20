@@ -2678,9 +2678,10 @@ struct ReplayEntry {
 }
 
 struct ReplayShard {
-    cache: LruCache<Box<[u8]>, ReplayEntry>,
-    queue: VecDeque<(Instant, Box<[u8]>, u64)>,
+    cache: LruCache<Arc<[u8]>, ReplayEntry>,
+    queue: VecDeque<(Instant, Arc<[u8]>, u64)>,
     seq_counter: u64,
+    capacity: usize,
 }
 
 impl ReplayShard {
@@ -2689,6 +2690,7 @@ impl ReplayShard {
             cache: LruCache::new(cap),
             queue: VecDeque::with_capacity(cap.get()),
             seq_counter: 0,
+            capacity: cap.get(),
         }
     }
 
@@ -2709,15 +2711,19 @@ impl ReplayShard {
             if *ts >= cutoff {
                 break;
             }
-            let (_, key, queue_seq) = self.queue.pop_front().unwrap();
+            self.evict_queue_front();
+        }
+    }
 
-            // Use key.as_ref() to get &[u8] — avoids Borrow<Q> ambiguity
-            // between Borrow<[u8]> and Borrow<Box<[u8]>>
-            if let Some(entry) = self.cache.peek(key.as_ref())
-                && entry.seq == queue_seq
-            {
-                self.cache.pop(key.as_ref());
-            }
+    fn evict_queue_front(&mut self) {
+        let Some((_, key, queue_seq)) = self.queue.pop_front() else {
+            return;
+        };
+
+        if let Some(entry) = self.cache.peek(key.as_ref())
+            && entry.seq == queue_seq
+        {
+            self.cache.pop(key.as_ref());
         }
     }
 
@@ -2738,13 +2744,16 @@ impl ReplayShard {
         if self.cache.peek(key).is_some() {
             return;
         }
+        while self.queue.len() >= self.capacity {
+            self.evict_queue_front();
+        }
 
         let seq = self.next_seq();
-        let boxed_key: Box<[u8]> = key.into();
+        let shared_key: Arc<[u8]> = Arc::from(key);
 
         self.cache
-            .put(boxed_key.clone(), ReplayEntry { seen_at: now, seq });
-        self.queue.push_back((now, boxed_key, seq));
+            .put(Arc::clone(&shared_key), ReplayEntry { seen_at: now, seq });
+        self.queue.push_back((now, shared_key, seq));
     }
 
     fn len(&self) -> usize {
