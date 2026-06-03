@@ -632,7 +632,7 @@ This document lists all configuration keys accepted by `config.toml`.
     ```
 ## beobachten
   - **Constraints / validation**: `bool`.
-  - **Description**: Enables per-IP forensic observation buckets.
+  - **Description**: Enables per-IP forensic observation buckets and appends TLS JA3/JA4 fingerprint snapshots to Beobachten output when available.
   - **Example**:
 
     ```toml
@@ -641,7 +641,7 @@ This document lists all configuration keys accepted by `config.toml`.
     ```
 ## beobachten_minutes
   - **Constraints / validation**: Must be `> 0` (minutes).
-  - **Description**: Retention window (minutes) for per-IP observation buckets.
+  - **Description**: Retention window (minutes) for per-IP observation buckets and in-memory TLS fingerprint buckets.
   - **Example**:
 
     ```toml
@@ -2173,7 +2173,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     ```
 ## runtime_edge_top_n
   - **Constraints / validation**: `1..=1000`.
-  - **Description**: Top-N size for edge connection leaderboard.
+  - **Description**: Top-N size for edge connection and TLS fingerprint leaderboard snapshots.
   - **Example**:
 
     ```toml

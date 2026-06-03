@@ -103,6 +103,7 @@ Notes:
 | `GET` | `/v1/runtime/me-selftest` | none | `200` | `RuntimeMeSelftestData` |
 | `GET` | `/v1/runtime/connections/summary` | none | `200` | `RuntimeEdgeConnectionsSummaryData` |
 | `GET` | `/v1/runtime/events/recent` | none | `200` | `RuntimeEdgeEventsData` |
+| `GET` | `/v1/runtime/tls-fingerprints` | optional `limit=1..1000` | `200` | `RuntimeEdgeTlsFingerprintsData` |
 | `GET` | `/v1/stats/users/active-ips` | none | `200` | `UserActiveIps[]` |
 | `GET` | `/v1/stats/users` | none | `200` | `UserInfo[]` |
 | `GET` | `/v1/users` | none | `200` | `UserInfo[]` |
@@ -815,6 +816,43 @@ An empty request body is accepted and generates a new secret automatically.
 | `event_type` | `string` | Event kind identifier. |
 | `context` | `string` | Context text (truncated to implementation-defined max length). |
 
+### `RuntimeEdgeTlsFingerprintsData`
+| Field | Type | Description |
+| --- | --- | --- |
+| `enabled` | `bool` | Endpoint availability under `runtime_edge_enabled`. |
+| `reason` | `string?` | `feature_disabled` when endpoint is disabled. |
+| `generated_at_epoch_secs` | `u64` | Snapshot generation timestamp. |
+| `data` | `RuntimeEdgeTlsFingerprintsPayload?` | Null when unavailable. |
+
+#### `RuntimeEdgeTlsFingerprintsPayload`
+| Field | Type | Description |
+| --- | --- | --- |
+| `limit` | `usize` | Effective Top-N row count. |
+| `retention_secs` | `u64` | In-memory retention window, derived from `general.beobachten_minutes`. |
+| `capacity` | `usize` | Maximum retained fingerprint buckets. |
+| `dropped_total` | `u64` | Buckets dropped because the collector was full. |
+| `parse_error_total` | `u64` | Complete ClientHello records that could not be fingerprinted. |
+| `by_fingerprint` | `RuntimeEdgeTlsFingerprintRow[]` | Global JA3/JA4 leaderboard. |
+| `by_ip` | `RuntimeEdgeTlsFingerprintRow[]` | Source-IP scoped leaderboard. |
+| `by_cidr` | `RuntimeEdgeTlsFingerprintRow[]` | Source CIDR scoped leaderboard (`/24` for IPv4, `/56` for IPv6). |
+| `by_user` | `RuntimeEdgeTlsFingerprintRow[]` | Authenticated user scoped leaderboard. |
+
+#### `RuntimeEdgeTlsFingerprintRow`
+| Field | Type | Description |
+| --- | --- | --- |
+| `scope` | `string?` | IP, CIDR, or username; absent in `by_fingerprint`. |
+| `ja3` | `string` | JA3 MD5 hash. |
+| `ja3_raw` | `string` | Raw JA3 field string. |
+| `ja4` | `string` | JA4 TLS client fingerprint. |
+| `ja4_raw` | `string` | Raw JA4 material used for the hashed parts. |
+| `total` | `u64` | Complete ClientHello observations for this bucket. |
+| `auth_success` | `u64` | TLS-authenticated observations for this bucket. |
+| `bad_or_probe` | `u64` | Complete ClientHello observations later classified as bad/probe. |
+| `first_seen_epoch_secs` | `u64` | First observation timestamp. |
+| `last_seen_epoch_secs` | `u64` | Last observation timestamp. |
+
+JA3 follows the Salesforce ClientHello field order. JA4 follows the FoxIO TLS-client `a_b_c` format; GREASE values are excluded and no high-cardinality Prometheus labels are emitted for fingerprints.
+
 ### `ZeroAllData`
 | Field | Type | Description |
 | --- | --- | --- |
@@ -1293,6 +1331,7 @@ Additional runtime endpoint behavior:
 | `/v1/runtime/me-selftest` | No | ME pool unavailable => `enabled=false`, `reason=source_unavailable` | `enabled=true`, full payload |
 | `/v1/runtime/connections/summary` | `runtime_edge_enabled=false` => `enabled=false`, `reason=feature_disabled` | Recompute lock contention with no cache entry => `enabled=true`, `reason=source_unavailable` | `enabled=true`, full payload |
 | `/v1/runtime/events/recent` | `runtime_edge_enabled=false` => `enabled=false`, `reason=feature_disabled` | Not used in current implementation | `enabled=true`, full payload |
+| `/v1/runtime/tls-fingerprints` | `runtime_edge_enabled=false` => `enabled=false`, `reason=feature_disabled` | Not used in current implementation | `enabled=true`, full payload |
 
 ## ME Fallback Behavior Exposed Via API
 
