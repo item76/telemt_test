@@ -125,7 +125,7 @@ pub(super) async fn apply_patch_to_path(
     })
 }
 
-/// Return the editable config sections (no `access.*`) + current revision.
+/// Return only the editable config sections + current revision.
 pub(super) async fn read_managed_config(config_path: &Path) -> Result<(Toml, String), ApiFailure> {
     let original = tokio::fs::read_to_string(config_path)
         .await
@@ -133,11 +133,19 @@ pub(super) async fn read_managed_config(config_path: &Path) -> Result<(Toml, Str
     let parsed: Toml = toml::from_str(&original)
         .map_err(|e| ApiFailure::internal(format!("failed to parse config: {}", e)))?;
 
-    let mut table = parsed
+    let parsed_table = parsed
         .as_table()
         .cloned()
         .unwrap_or_else(toml::value::Table::new);
-    table.remove("access"); // never expose users/secrets via this endpoint
+    // Whitelist: return ONLY the editable sections. A blacklist (just removing
+    // `access`) would leak `server` (carries the API `auth_header` + per-node
+    // identity) and `network` (per-node addresses). Mirror the PATCH contract.
+    let mut table = toml::value::Table::new();
+    for section in EDITABLE_SECTIONS {
+        if let Some(value) = parsed_table.get(*section) {
+            table.insert((*section).to_string(), value.clone());
+        }
+    }
 
     let revision = compute_revision(&original);
     Ok((Toml::Table(table), revision))
@@ -277,6 +285,24 @@ mod tests {
         assert!(table.contains_key("censorship"));
         assert!(!table.contains_key("access")); // secrets never leave the box here
         assert_eq!(revision, current_revision(&path).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn read_managed_config_returns_only_editable_sections() {
+        // server carries the API auth_header + per-node identity; network carries
+        // per-node addresses. Neither must be exposed by GET /v1/config.
+        let (path, _d) = temp_config(concat!(
+            "[censorship]\ntls_domain = \"a\"\n",
+            "[server]\nport = 443\n[server.api]\nauth_header = \"SECRET\"\n",
+            "[network]\nipv4 = \"1.2.3.4\"\n",
+            "[access.users]\nbob = \"deadbeef\"\n",
+        ));
+        let (value, _rev) = read_managed_config(&path).await.unwrap();
+        let table = value.as_table().unwrap();
+        assert!(table.contains_key("censorship"));
+        assert!(!table.contains_key("server")); // no API auth_header / identity leak
+        assert!(!table.contains_key("network")); // no per-node identity leak
+        assert!(!table.contains_key("access")); // no users/secrets
     }
 
     #[tokio::test]

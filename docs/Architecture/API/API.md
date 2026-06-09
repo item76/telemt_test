@@ -277,11 +277,10 @@ An empty request body is accepted and generates a new secret automatically.
 
 ### `ConfigData`
 
-Returned by `GET /v1/config`. The top-level fields mirror the editable TOML sections; `access.*` is intentionally omitted.
+Returned by `GET /v1/config` as the envelope `data`. The fields are exactly the editable TOML sections. The current revision is returned in the envelope `revision` field (same value as `config_hash` in `SystemInfoData`), **not** inside `data`.
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `revision` | `string` | SHA-256 hex of the current on-disk config content (same value as `config_hash` in `SystemInfoData` and the envelope `revision`). |
 | `general` | `object?` | `[general]` section, if present in config. |
 | `timeouts` | `object?` | `[timeouts]` section, if present. |
 | `censorship` | `object?` | `[censorship]` section, if present. |
@@ -289,7 +288,7 @@ Returned by `GET /v1/config`. The top-level fields mirror the editable TOML sect
 | `show_link` | `object?` | `[show_link]` section, if present. |
 | `dc_overrides` | `object?` | `[dc_overrides]` section, if present. |
 
-Sections absent from the config file are absent from the response (not `null`). The `access` section is always stripped — users and secrets are never exposed here.
+Sections absent from the config file are absent from the response (not `null`). Only the editable sections above are returned; `access` (users/secrets), `server` (carries the API `auth_header` and per-node identity), and `network` (per-node addresses) are always excluded.
 
 ### `PatchConfigResponse`
 

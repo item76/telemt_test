@@ -354,14 +354,16 @@ fn find_toml_table_bounds(source: &str, table_name: &str) -> Option<(usize, usiz
     let mut start = None;
 
     for line in source.split_inclusive('\n') {
-        let trimmed = line.trim();
+        // Drop any inline comment so a hand-edited header like
+        // `[censorship] # note` still matches. Section names never contain `#`.
+        let header = line.trim().split('#').next().unwrap_or("").trim();
         if let Some(start_offset) = start {
-            let is_same_array = trimmed == array;
-            let is_new_header = trimmed.starts_with('[');
+            let is_same_array = header == array;
+            let is_new_header = header.starts_with('[');
             if is_new_header && !is_same_array {
                 return Some((start_offset, offset));
             }
-        } else if trimmed == single || trimmed == array {
+        } else if header == single || header == array {
             start = Some(offset);
         }
         offset = offset.saturating_add(line.len());
@@ -451,6 +453,18 @@ mod tests {
         let slice = &src[start..end];
         assert!(slice.starts_with("[[upstreams]]"));
         assert!(slice.contains("kind = \"b\"")); // spans through the last upstream block
+    }
+
+    #[test]
+    fn find_bounds_matches_header_with_inline_comment() {
+        let src = "[censorship] # notes\ntls_domain = \"a\"\n\n[server]\nport = 1\n";
+        let bounds = find_toml_table_bounds(src, "censorship");
+        assert!(bounds.is_some(), "commented header must still match");
+        let (start, end) = bounds.unwrap();
+        let slice = &src[start..end];
+        assert!(slice.starts_with("[censorship] # notes"));
+        assert!(slice.contains("tls_domain"));
+        assert!(!slice.contains("[server]")); // terminates at the next header
     }
 
     #[test]
