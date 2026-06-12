@@ -79,14 +79,17 @@ pub(crate) fn spawn_synlimit_controller(config_rx: watch::Receiver<Arc<ProxyConf
     }
 
     tokio::spawn(async move {
-        wait_for_config_channel_close(config_rx).await;
+        wait_for_config_channel_close_and_reconcile(config_rx).await;
         clear_synlimit_rules_all_backends().await;
     });
 }
 
-async fn wait_for_config_channel_close(mut config_rx: watch::Receiver<Arc<ProxyConfig>>) {
+async fn wait_for_config_channel_close_and_reconcile(
+    mut config_rx: watch::Receiver<Arc<ProxyConfig>>,
+) {
     while config_rx.changed().await.is_ok() {
-        config_rx.borrow_and_update();
+        let cfg = config_rx.borrow_and_update().clone();
+        reconcile_synlimit_rules(&cfg).await;
     }
 }
 
@@ -183,10 +186,6 @@ async fn apply_iptables_synlimit_rules_for_binary(
     if targets.is_empty() {
         return Ok(());
     }
-    if !command_exists(binary) {
-        return Err(format!("{binary} is not available"));
-    }
-
     let _ = run_command(binary, &["-t", "filter", "-N", IPTABLES_CHAIN], None).await;
     run_command(binary, &["-t", "filter", "-F", IPTABLES_CHAIN], None).await?;
     if run_command(
@@ -316,9 +315,6 @@ fn synlimit_rate_arg(seconds: u32, hitcount: u32) -> String {
 }
 
 async fn clear_iptables_synlimit_rules_for_binary(binary: &str) {
-    if !command_exists(binary) {
-        return;
-    }
     for _ in 0..8 {
         if run_command(
             binary,
@@ -336,10 +332,6 @@ async fn clear_iptables_synlimit_rules_for_binary(binary: &str) {
 }
 
 async fn apply_nft_synlimit_rules(targets: &SynLimitTargets) -> Result<(), String> {
-    if !command_exists("nft") {
-        return Err("nft is not available".to_string());
-    }
-
     let families = detect_nft_table_families().await;
     for plan in nft_apply_plan(families, &targets.nft_v4, &targets.nft_v6) {
         let script = nft_synlimit_script(plan);
@@ -448,9 +440,6 @@ fn nft_synlimit_script(plan: NftApplyPlan<'_>) -> String {
 }
 
 async fn clear_nft_synlimit_rules_all_families() {
-    if !command_exists("nft") {
-        return;
-    }
     for family in [NftFamily::Inet, NftFamily::Ip, NftFamily::Ip6] {
         let _ = run_command(
             "nft",
@@ -462,10 +451,10 @@ async fn clear_nft_synlimit_rules_all_families() {
 }
 
 async fn run_command(binary: &str, args: &[&str], stdin: Option<String>) -> Result<(), String> {
-    if !command_exists(binary) {
+    let Some(command_path) = resolve_command(binary) else {
         return Err(format!("{binary} is not available"));
-    }
-    let mut command = Command::new(binary);
+    };
+    let mut command = Command::new(command_path);
     command.args(args);
     if stdin.is_some() {
         command.stdin(std::process::Stdio::piped());
@@ -499,10 +488,10 @@ async fn run_command(binary: &str, args: &[&str], stdin: Option<String>) -> Resu
 }
 
 async fn run_command_stdout(binary: &str, args: &[&str]) -> Result<String, String> {
-    if !command_exists(binary) {
+    let Some(command_path) = resolve_command(binary) else {
         return Err(format!("{binary} is not available"));
-    }
-    let output = Command::new(binary)
+    };
+    let output = Command::new(command_path)
         .args(args)
         .output()
         .await
@@ -518,14 +507,14 @@ async fn run_command_stdout(binary: &str, args: &[&str]) -> Result<String, Strin
     })
 }
 
-fn command_exists(binary: &str) -> bool {
-    let Some(path_var) = std::env::var_os("PATH") else {
-        return false;
-    };
-    std::env::split_paths(&path_var).any(|dir| {
-        let candidate: PathBuf = dir.join(binary);
-        candidate.exists() && candidate.is_file()
-    })
+fn resolve_command(binary: &str) -> Option<PathBuf> {
+    let mut dirs = std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .unwrap_or_default();
+    dirs.extend(["/usr/sbin", "/sbin", "/usr/bin", "/bin"].map(PathBuf::from));
+    dirs.into_iter()
+        .map(|dir| dir.join(binary))
+        .find(|candidate| candidate.exists() && candidate.is_file())
 }
 
 fn has_cap_net_admin() -> bool {
