@@ -355,8 +355,14 @@ mod tests {
 
         let written = tokio::fs::read_to_string(&path).await.unwrap();
         assert!(written.contains("public_port = 443"), "{written}");
-        assert!(!written.contains("443.0"), "must not be a float:\n{written}");
-        assert!(!written.contains("\"443\""), "must not be a string:\n{written}");
+        assert!(
+            !written.contains("443.0"),
+            "must not be a float:\n{written}"
+        );
+        assert!(
+            !written.contains("\"443\""),
+            "must not be a string:\n{written}"
+        );
 
         let parsed: toml::Value = toml::from_str(&written).unwrap();
         assert_eq!(

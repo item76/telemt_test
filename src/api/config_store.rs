@@ -381,7 +381,9 @@ fn header_belongs_to(header: &str, table_name: &str) -> bool {
     };
     let body = body.trim();
     body == table_name
-        || body.strip_prefix(table_name).is_some_and(|rest| rest.starts_with('.'))
+        || body
+            .strip_prefix(table_name)
+            .is_some_and(|rest| rest.starts_with('.'))
 }
 
 /// Locate the first contiguous byte range covering `table_name` and the nested
