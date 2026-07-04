@@ -673,6 +673,16 @@ impl ProxyConfig {
                 )));
             }
         }
+        let mut cidr_auto_templates = HashSet::new();
+        for cidr in config.access.cidr_rate_limits.keys() {
+            for template in cidr.auto_templates().into_iter().flatten() {
+                if !cidr_auto_templates.insert(template) {
+                    return Err(ProxyError::Config(format!(
+                        "access.cidr_rate_limits.{cidr} duplicates normalized auto-template {template}"
+                    )));
+                }
+            }
+        }
 
         if config.general.me_reinit_every_secs == 0 {
             return Err(ProxyError::Config(
