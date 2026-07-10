@@ -1,5 +1,6 @@
 use bytes::Bytes;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::OwnedSemaphorePermit;
 
 use crate::crypto::{AesCbc, crc32, crc32c};
 use crate::error::{ProxyError, Result};
@@ -13,7 +14,10 @@ const RPC_WRITER_FRAME_BUF_RETAIN: usize = 64 * 1024;
 
 /// Commands sent to dedicated writer tasks to avoid mutex contention on TCP writes.
 pub(crate) enum WriterCommand {
-    Data(Bytes),
+    Data {
+        payload: Bytes,
+        _permit: Option<OwnedSemaphorePermit>,
+    },
     DataAndFlush(Bytes),
     ProxyReq(ProxyReqCommand),
     ControlAndFlush([u8; 12]),
@@ -28,6 +32,7 @@ pub(crate) struct ProxyReqCommand {
     pub(crate) proto_flags: u32,
     pub(crate) proxy_tag: Option<[u8; 16]>,
     pub(crate) payload: PooledBuffer,
+    pub(crate) _permit: OwnedSemaphorePermit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

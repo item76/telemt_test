@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use tokio::sync::mpsc;
+use tokio::sync::{OwnedSemaphorePermit, mpsc};
 use tokio::sync::mpsc::error::TrySendError;
 use tracing::{debug, warn};
 
@@ -43,9 +43,18 @@ fn proxy_tag_array(tag: Option<&[u8]>) -> Option<[u8; 16]> {
     tag.and_then(|tag| <[u8; 16]>::try_from(tag).ok())
 }
 
-fn proxy_req_payload_from_command(cmd: WriterCommand) -> Option<PooledBuffer> {
+fn proxy_req_payload_from_command(
+    cmd: WriterCommand,
+) -> Option<(PooledBuffer, OwnedSemaphorePermit)> {
     match cmd {
-        WriterCommand::ProxyReq(command) => Some(command.payload),
+        WriterCommand::ProxyReq(command) => Some((command.payload, command._permit)),
+        _ => None,
+    }
+}
+
+fn payload_permit_from_data_command(cmd: WriterCommand) -> Option<OwnedSemaphorePermit> {
+    match cmd {
+        WriterCommand::Data { _permit, .. } => _permit,
         _ => None,
     }
 }
@@ -67,6 +76,7 @@ async fn reserve_writer_command_slot(
 
 impl MePool {
     /// Send RPC_PROXY_REQ. `tag_override`: per-user ad_tag (from access.user_ad_tags); if None, uses pool default.
+    /// `payload_permit` keeps optional client byte accounting alive until the writer consumes the command.
     pub async fn send_proxy_req(
         self: &Arc<Self>,
         conn_id: u64,
@@ -76,6 +86,7 @@ impl MePool {
         data: &[u8],
         proto_flags: u32,
         tag_override: Option<&[u8]>,
+        mut payload_permit: Option<OwnedSemaphorePermit>,
     ) -> Result<()> {
         let tag = tag_override.or(self.proxy_tag.as_deref());
         let build_routed_payload = |effective_our_addr: SocketAddr| {
@@ -119,7 +130,11 @@ impl MePool {
             if let Some((current, current_meta)) = self.registry.get_writer_with_meta(conn_id).await
             {
                 let (current_payload, _) = build_routed_payload(current_meta.our_addr);
-                match current.tx.try_send(WriterCommand::Data(current_payload)) {
+                let command = WriterCommand::Data {
+                    payload: current_payload,
+                    _permit: payload_permit.take(),
+                };
+                match current.tx.try_send(command) {
                     Ok(()) => {
                         self.note_hybrid_route_success();
                         return Ok(());
@@ -143,14 +158,17 @@ impl MePool {
                                     "ME writer channel full within blocking send timeout".into(),
                                 ));
                             }
-                            Err(WriterCommandReserveError::Closed) => {}
+                            Err(WriterCommandReserveError::Closed) => {
+                                payload_permit = payload_permit_from_data_command(cmd);
+                            }
                         }
                         warn!(writer_id = current.writer_id, "ME writer channel closed");
                         self.remove_writer_and_close_clients(current.writer_id)
                             .await;
                         continue;
                     }
-                    Err(TrySendError::Closed(_)) => {
+                    Err(TrySendError::Closed(cmd)) => {
+                        payload_permit = payload_permit_from_data_command(cmd);
                         warn!(writer_id = current.writer_id, "ME writer channel closed");
                         self.remove_writer_and_close_clients(current.writer_id)
                             .await;
@@ -479,7 +497,10 @@ impl MePool {
                             self.remove_writer_and_close_clients(w.id).await;
                             continue;
                         }
-                        permit.send(WriterCommand::Data(payload));
+                        permit.send(WriterCommand::Data {
+                            payload,
+                            _permit: payload_permit.take(),
+                        });
                         self.stats
                             .increment_me_writer_pick_success_try_total(pick_mode);
                         if w.generation < self.current_generation() {
@@ -548,7 +569,10 @@ impl MePool {
                         self.remove_writer_and_close_clients(w.id).await;
                         continue;
                     }
-                    permit.send(WriterCommand::Data(payload));
+                    permit.send(WriterCommand::Data {
+                        payload,
+                        _permit: payload_permit.take(),
+                    });
                     self.stats
                         .increment_me_writer_pick_success_fallback_total(pick_mode);
                     if w.generation < self.current_generation() {
@@ -567,6 +591,7 @@ impl MePool {
     }
 
     /// Send RPC_PROXY_REQ while keeping the first bound-writer path allocation-light.
+    /// The client byte permit follows the payload until writer completion or command drop.
     pub async fn send_proxy_req_pooled(
         self: &Arc<Self>,
         conn_id: u64,
@@ -574,6 +599,7 @@ impl MePool {
         client_addr: SocketAddr,
         our_addr: SocketAddr,
         payload: PooledBuffer,
+        _permit: OwnedSemaphorePermit,
         proto_flags: u32,
         tag_override: Option<[u8; 16]>,
     ) -> Result<()> {
@@ -587,6 +613,7 @@ impl MePool {
                 proto_flags,
                 proxy_tag: tag,
                 payload,
+                _permit,
             });
             match current.tx.try_send(command) {
                 Ok(()) => {
@@ -613,7 +640,8 @@ impl MePool {
                             ));
                         }
                         Err(WriterCommandReserveError::Closed) => {
-                            let Some(payload) = proxy_req_payload_from_command(cmd) else {
+                            let Some((payload, _permit)) = proxy_req_payload_from_command(cmd)
+                            else {
                                 return Err(ProxyError::Proxy(
                                     "ME writer rejected unexpected command type".into(),
                                 ));
@@ -630,13 +658,14 @@ impl MePool {
                                     payload.as_ref(),
                                     proto_flags,
                                     tag.as_ref().map(|tag| tag.as_slice()),
+                                    Some(_permit),
                                 )
                                 .await;
                         }
                     }
                 }
                 Err(TrySendError::Closed(cmd)) => {
-                    let Some(payload) = proxy_req_payload_from_command(cmd) else {
+                    let Some((payload, _permit)) = proxy_req_payload_from_command(cmd) else {
                         return Err(ProxyError::Proxy(
                             "ME writer rejected unexpected command type".into(),
                         ));
@@ -653,6 +682,7 @@ impl MePool {
                             payload.as_ref(),
                             proto_flags,
                             tag.as_ref().map(|tag| tag.as_slice()),
+                            Some(_permit),
                         )
                         .await;
                 }
@@ -667,6 +697,7 @@ impl MePool {
             payload.as_ref(),
             proto_flags,
             tag.as_ref().map(|tag| tag.as_slice()),
+            Some(_permit),
         )
         .await
     }

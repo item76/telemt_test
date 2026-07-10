@@ -63,7 +63,7 @@ async fn writer_command_loop(
             _ = cancel.cancelled() => return Ok(()),
             cmd = rx.recv() => {
                 match cmd {
-                    Some(WriterCommand::Data(payload)) => {
+                    Some(WriterCommand::Data { payload, _permit }) => {
                         rpc_writer.send(&payload).await?;
                     }
                     Some(WriterCommand::DataAndFlush(payload)) => {
