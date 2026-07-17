@@ -107,7 +107,9 @@ Notes:
 | `GET` | `/v1/stats/users/active-ips` | none | `200` | `UserActiveIps[]` |
 | `GET` | `/v1/stats/users` | none | `200` | `UserInfo[]` |
 | `GET` | `/v1/config` | none | `200` | `ConfigData` |
-| `PATCH` | `/v1/config` | sparse JSON object | `200` | `PatchConfigResponse` |
+| `PATCH` | `/v1/config` | sparse JSON object; optional reload query | `200` or `202` | `PatchConfigResponse` |
+| `POST` | `/v1/system/reload` | `ReloadRequest` or empty body | `202` | `ReloadAccepted` |
+| `GET` | `/v1/system/reload/{id}` | none | `200` | `ReloadStatus` |
 | `GET` | `/v1/users` | none | `200` | `UserInfo[]` |
 | `POST` | `/v1/users` | `CreateUserRequest` | `201` or `202` | `CreateUserResponse` |
 | `GET` | `/v1/users/{username}` | none | `200` | `UserInfo` |
@@ -146,7 +148,9 @@ Notes:
 | `GET /v1/stats/users/active-ips` | Returns users that currently have non-empty active source-IP lists. |
 | `GET /v1/stats/users` | Alias of `GET /v1/users`; returns disk-first user views with runtime lag flag. |
 | `GET /v1/config` | Returns the current editable config sections as JSON (no `access.*`) plus the revision. |
-| `PATCH /v1/config` | Applies a sparse patch to editable config sections; validates, writes, and reports restart impact. |
+| `PATCH /v1/config` | Applies a sparse patch and optionally submits an in-process runtime reload to Maestro. |
+| `POST /v1/system/reload` | Loads and validates the current on-disk config, then asks Maestro to prepare and activate a new runtime generation. |
+| `GET /v1/system/reload/{id}` | Returns one retained reload status; the coordinator retains the most recent 32 operations. |
 | `GET /v1/users` | Returns disk-first user views sorted by username. |
 | `POST /v1/users` | Creates a user and returns the effective user view plus secret. |
 | `GET /v1/users/{username}` | Returns one disk-first user view or `404` when absent. |
@@ -170,11 +174,13 @@ Notes:
 | `404` | `not_found` | Unknown route, unknown user, or unsupported sub-route. |
 | `405` | `method_not_allowed` | Unsupported method for `/v1/users/{username}` route shape. |
 | `409` | `revision_conflict` | `If-Match` revision mismatch. |
+| `409` | `reload_in_progress` | Another reload operation is non-terminal. |
 | `409` | `user_exists` | User already exists on create. |
 | `409` | `last_user_forbidden` | Attempt to delete last configured user. |
 | `413` | `payload_too_large` | Body exceeds `request_body_limit_bytes`. |
 | `500` | `internal_error` | Internal error (I/O, serialization, config load/save). |
 | `503` | `api_disabled` | API disabled in config. |
+| `503` | `maestro_unavailable` | Maestro's reload command channel is unavailable. |
 
 ## Routing and Method Edge Cases
 
@@ -292,13 +298,17 @@ Sections absent from the config file are absent from the response (not `null`). 
 
 ### `PatchConfigResponse`
 
-Returned by `PATCH /v1/config` on success (`200`).
+Returned by `PATCH /v1/config` on success (`200`, or `202` when a reload was accepted).
 
 | Field | Type | Description |
 | --- | --- | --- |
 | `revision` | `string` | SHA-256 hex of the config file after the patch was written. |
-| `restart_required` | `bool` | `true` when one or more changed fields require a process restart to take effect. Hot-reloadable fields (e.g. `general.log_level`) are applied automatically by the config file watcher; restart-required fields (e.g. any `censorship.*`, `timeouts.*`, `upstreams`, or `general.modes` change) are written to disk but only take effect after the Telemt process is restarted. The caller is responsible for triggering a restart when this flag is `true`. |
+| `restart_required` | `bool` | Legacy classifier result: `true` when the old file watcher alone cannot apply every changed field. Use `runtime_reload_required` and `process_restart_required` for new integrations. |
+| `runtime_reload_required` | `bool` | `true` when full effect requires a Maestro runtime-generation reload rather than the legacy hot-field overlay. |
+| `process_restart_required` | `bool` | `true` when process-owned sockets or paths changed and remain deferred after an in-process reload. |
+| `deferred_process_fields` | `string[]` | Process-owned fields that the active process cannot rebind during generation activation. |
 | `changed` | `string[]` | Top-level section names that differed between the old and new config (e.g. `["censorship"]`). |
+| `reload` | `ReloadAccepted?` | Present only when the patch included a valid reload query and Maestro accepted the operation. |
 
 ### `HealthData`
 | Field | Type | Description |
@@ -1376,24 +1386,50 @@ Applies a sparse patch to the editable config sections. The merged config is ful
 
 **Read-only mode:** returns `403 read_only` when the API runs with `read_only = true`.
 
-**Success `200` response body** (`data` field of the standard envelope):
+**Optional in-process reload query:**
+
+| Query | Required | Description |
+| --- | --- | --- |
+| `reload=instant` | no | Activates a new generation and cancels sessions owned by the previous generation. |
+| `reload=drain` | no | Activates a new generation and lets old sessions finish until `timeout_secs`. |
+| `timeout_secs=1..3600` | for `reload=drain` | Bounded old-generation drain interval. Invalid with `reload=instant`. |
+| `failure_policy=keep_new\|rollback` | no | Defaults to `keep_new`. `rollback` applies only through the activation barrier, before old-generation teardown. |
+
+Without a `reload` query parameter, the endpoint preserves the legacy behavior: it writes the patch and the file watcher applies only supported hot fields.
+
+**Success `200` or `202` response body** (`data` field of the standard envelope):
 ```json
 {
   "revision": "<new-sha256-hex>",
   "restart_required": true,
-  "changed": ["censorship"]
+  "runtime_reload_required": true,
+  "process_restart_required": false,
+  "deferred_process_fields": [],
+  "changed": ["censorship"],
+  "reload": {
+    "reload_id": 7,
+    "target_generation": 2,
+    "config_revision": "<new-sha256-hex>",
+    "state": "accepted",
+    "mode": "instant",
+    "failure_policy": "keep_new"
+  }
 }
 ```
 
 - `revision` — SHA-256 hex of the config file after the write.
-- `restart_required` — `true` when the change affects a field that Telemt cannot hot-reload (e.g. `censorship.*`, `timeouts.*`, `upstreams`, `general.modes`). Hot-reloadable fields (e.g. `general.log_level`) are applied automatically by the config file watcher. Restart-required fields are written to disk but only take effect after the Telemt process is restarted; the caller is responsible for triggering the restart.
+- `restart_required` — legacy file-watcher classification retained for compatibility.
+- `runtime_reload_required` — reports whether a full Maestro generation reload is needed for runtime effect.
+- `process_restart_required` and `deferred_process_fields` — report process-owned sockets or paths that remain unchanged by an in-process reload.
 - `changed` — list of top-level section names that differed.
+- `reload` — accepted operation metadata; omitted when no reload query was supplied.
 
 **Status codes:**
 
 | HTTP | `error.code` | Condition |
 | --- | --- | --- |
 | `200` | — | Patch applied successfully. |
+| `202` | — | Patch applied and runtime reload accepted. |
 | `400` | `bad_request` | Invalid JSON, empty patch, or config validation/deserialization failure. |
 | `400` | `access_not_editable` | Patch contains an `access` key. |
 | `400` | `section_not_editable` | Patch contains `server`, `network`, or an unknown top-level key. |
@@ -1401,6 +1437,7 @@ Applies a sparse patch to the editable config sections. The merged config is ful
 | `403` | `read_only` | API is in read-only mode. |
 | `405` | `method_not_allowed` | Method other than `GET` or `PATCH` used on `/v1/config`. |
 | `409` | `revision_conflict` | `If-Match` header supplied but does not match current revision. |
+| `409` | `reload_in_progress` | Another runtime reload is active; the patch is not written. |
 | `500` | `internal_error` | I/O or serialization failure. |
 
 **curl example:**
@@ -1412,14 +1449,36 @@ curl -s -H "Authorization: <token>" http://127.0.0.1:<api>/v1/system/info | jq -
 curl -s -X PATCH -H "Authorization: <token>" -H "If-Match: <revision>" \
   -H "Content-Type: application/json" \
   -d '{"censorship":{"tls_domain":"front.example.com"}}' \
-  http://127.0.0.1:<api>/v1/config
+  'http://127.0.0.1:<api>/v1/config?reload=instant'
 ```
+
+## Runtime Reload Endpoints
+
+### `POST /v1/system/reload`
+
+Loads the current on-disk config under the API mutation lock and submits an immutable config snapshot to Maestro. `If-Match` is optional and uses the same revision contract as `PATCH /v1/config`. An empty body defaults to `{"mode":"instant","failure_policy":"keep_new"}`.
+
+```json
+{
+  "mode": "drain",
+  "timeout_secs": 30,
+  "failure_policy": "rollback"
+}
+```
+
+The endpoint returns `202` with `ReloadAccepted`. A concurrent non-terminal reload returns `409 reload_in_progress`. Config parsing or validation failure is reported before a command is submitted.
+
+### `GET /v1/system/reload/{id}`
+
+Returns `ReloadStatus` with `state` equal to `accepted`, `preparing`, `activating`, `draining`, `succeeded`, `rolled_back`, or `failed`. Terminal statuses include `finished_at_epoch_secs`; failures include `error`. Successful activation may include `warnings` for old-generation cleanup failures and `deferred_process_fields` for process-owned settings.
+
+Runtime generation activation rebuilds statistics, upstream routing, replay and buffer state, TLS-front cache, IP tracking, admission/route state, and Middle-End orchestration. Per-user quota accounting is process-scoped and remains continuous across generations. API, metrics, client TCP/Unix listeners, PID ownership, and logging remain process-scoped; changed bind/path fields are reported as deferred and do not cause Maestro to invoke systemd, containerd, or another process supervisor.
 
 ## Mutation Semantics
 
 | Endpoint | Notes |
 | --- | --- |
-| `PATCH /v1/config` | Deep-merges the patch into editable config sections (tables merged per-field; arrays/scalars replaced wholesale). Validates the merged result before writing. Writes only the touched sections via atomic `tmp + rename`. Returns the new revision and which sections changed. |
+| `PATCH /v1/config` | Deep-merges and validates the patch, writes touched sections via atomic `tmp + rename`, and optionally submits the exact written revision for an in-process Maestro reload. |
 | `POST /v1/users` | Creates user, validates config, then atomically updates only affected `access.*` TOML tables (`access.users` always, plus optional per-user tables present in request). |
 | `PATCH /v1/users/{username}` | Partial update of provided fields only. Missing fields remain unchanged; explicit `null` removes optional per-user entries. The write path updates only affected `access.*` TOML tables. |
 | `POST /v1/users/{username}/rotate-secret` | Replaces the user's secret with a provided valid 32-hex value or a generated value, then returns the effective secret in `CreateUserResponse`. |
