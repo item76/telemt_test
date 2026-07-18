@@ -334,6 +334,7 @@ Returned by `PATCH /v1/config` on success (`200`, or `202` when a reload was acc
 | `connections_bad_total` | `u64` | Failed/invalid client connections. |
 | `connections_bad_by_class` | `ClassCount[]` | Failed/invalid connections grouped by class. |
 | `handshake_failures_by_class` | `ClassCount[]` | Handshake failures grouped by class. |
+| `handshake_failures_by_stage` | `StageCount[]` | Handshake failures grouped by state-machine stage. |
 | `handshake_timeouts_total` | `u64` | Handshake timeout count. |
 | `configured_users` | `usize` | Number of configured users in config. |
 
@@ -342,6 +343,12 @@ Returned by `PATCH /v1/config` on success (`200`, or `202` when a reload was acc
 | --- | --- | --- |
 | `class` | `string` | Failure class label. |
 | `total` | `u64` | Counter value for this class. |
+
+#### `StageCount`
+| Field | Type | Description |
+| --- | --- | --- |
+| `stage` | `string` | State-machine stage label. |
+| `total` | `u64` | Counter value for this stage. |
 
 ### `SystemInfoData`
 | Field | Type | Description |
@@ -927,6 +934,7 @@ JA3 follows the Salesforce ClientHello field order. JA4 follows the FoxIO TLS-cl
 | `connections_bad_total` | `u64` | Failed/invalid connections. |
 | `connections_bad_by_class` | `ClassCount[]` | Failed/invalid connections grouped by class. |
 | `handshake_failures_by_class` | `ClassCount[]` | Handshake failures grouped by class. |
+| `handshake_failures_by_stage` | `StageCount[]` | Handshake failures grouped by state-machine stage. |
 | `handshake_timeouts_total` | `u64` | Handshake timeouts. |
 | `accept_permit_timeout_total` | `u64` | Listener admission permit acquisition timeouts. |
 | `configured_users` | `usize` | Configured user count. |
